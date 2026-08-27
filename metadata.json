@@ -1,0 +1,8 @@
+{
+  "name": "Number Counter & Minigames Arcade Bot",
+  "description": "Discord bot and live web controller with sequential number counting (channel 1542148410084171826) featuring ✅ and ☑️ tick reactions, live updating leaderboard embeds, and a unified Minigames Dashboard with thread-based challenges (vs Gemma AI or other players).",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
