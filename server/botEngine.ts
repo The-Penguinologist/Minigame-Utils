@@ -15,6 +15,19 @@ import {
   TextChannel,
 } from 'discord.js';
 import { getGemmaTicTacToeMove, getGemmaRPSMove, getGemmaTrivia, getGemmaConnect4Move } from './geminiService.js';
+import {
+  initDatabase,
+  getGameStateFromDB,
+  updateGameStateInDB,
+  getUserStatsMapFromDB,
+  saveUserStatToDB,
+  getCooldownsMapFromDB,
+  saveCooldownToDB,
+  deleteCooldownFromDB,
+  clearAllDBData,
+  UserStatsRecord,
+  CooldownRecord,
+} from './db.js';
 
 const STATE_FILE_PATH = path.join(process.cwd(), 'real_bot_state.json');
 
@@ -126,77 +139,129 @@ export class ECounterEngine {
     this.loadStateFromDisk();
   }
 
-  public saveStateToDisk() {
+  public async saveStateToDisk() {
     try {
-      const data = {
-        numberChannelId: this.numberChannelId,
-        numberLeaderboardChannelId: this.numberLeaderboardChannelId,
+      updateGameStateInDB({
         currentNumber: this.currentNumber,
         highestNumber: this.highestNumber,
-        lastNumberUserId: this.lastNumberUserId,
-        lastNumberUsername: this.lastNumberUsername,
-        lastNumberAvatarUrl: this.lastNumberAvatarUrl,
-        lastNumberTimestamp: this.lastNumberTimestamp,
-        numberLeaderboard: Array.from(this.numberLeaderboard.entries()),
-        threads: Array.from(this.threads.entries()),
-        cooldowns: Array.from(this.cooldowns.entries()),
+        lastUserId: this.lastNumberUserId,
+        lastUsername: this.lastNumberUsername,
+        lastAvatarUrl: this.lastNumberAvatarUrl,
+        lastTimestamp: this.lastNumberTimestamp,
         liveLeaderboardMessageId: this.liveLeaderboardMessageId,
-      };
-      fs.writeFileSync(STATE_FILE_PATH, JSON.stringify(data, null, 2), 'utf-8');
+        numberChannelId: this.numberChannelId,
+        leaderboardChannelId: this.numberLeaderboardChannelId,
+      });
+
+      // Save user stats to SQLite
+      for (const stat of this.numberLeaderboard.values()) {
+        saveUserStatToDB({
+          userId: stat.userId,
+          username: stat.username,
+          avatarUrl: stat.avatarUrl || null,
+          totalNumbersCounted: stat.totalNumbersCounted,
+          highestStreakContribution: stat.highestStreakContribution,
+          failedCount: stat.failedCount,
+          lastActive: stat.lastActive,
+        });
+      }
+
+      // Save cooldowns to SQLite
+      for (const cd of this.cooldowns.values()) {
+        saveCooldownToDB({
+          userId: cd.userId,
+          username: cd.username,
+          avatarUrl: cd.avatarUrl || null,
+          reason: cd.reason,
+          bannedAt: cd.bannedAt,
+          bannedUntil: cd.bannedUntil,
+        });
+      }
     } catch (err: any) {
-      console.error('Failed to save state to disk:', err.message);
+      console.error('Failed to save state to SQLite DB:', err.message);
     }
   }
 
-  private loadStateFromDisk() {
+  private async loadStateFromDisk() {
     try {
-      if (fs.existsSync(STATE_FILE_PATH)) {
-        const raw = fs.readFileSync(STATE_FILE_PATH, 'utf-8');
-        const data = JSON.parse(raw);
-        if (data.numberChannelId) {
-          this.numberChannelId = data.numberChannelId;
-          this.channelId = data.numberChannelId;
-          this.eChannelId = data.numberChannelId;
-        }
-        if (data.numberLeaderboardChannelId !== undefined) {
-          this.numberLeaderboardChannelId = data.numberLeaderboardChannelId;
-        }
-        if (data.liveLeaderboardMessageId) {
-          this.liveLeaderboardMessageId = data.liveLeaderboardMessageId;
-        }
-        this.currentNumber = typeof data.currentNumber === 'number' ? data.currentNumber : 0;
-        this.highestNumber = typeof data.highestNumber === 'number' ? data.highestNumber : 0;
-        this.lastNumberUserId = data.lastNumberUserId || null;
-        this.lastNumberUsername = data.lastNumberUsername || null;
-        this.lastNumberAvatarUrl = data.lastNumberAvatarUrl || null;
-        this.lastNumberTimestamp = data.lastNumberTimestamp || null;
-        if (Array.isArray(data.numberLeaderboard)) {
-          this.numberLeaderboard = new Map(data.numberLeaderboard);
-        }
-        if (Array.isArray(data.threads)) {
-          this.threads = new Map(data.threads);
-        }
-        if (Array.isArray(data.cooldowns)) {
-          this.cooldowns = new Map(data.cooldowns);
-        }
-        this.addLog('info', `State loaded. Number Streak: ${this.currentNumber} | Number Record: ${this.highestNumber} | Active Threads: ${this.threads.size}`);
-        return;
-      }
-    } catch (err: any) {
-      this.addLog('warn', `State file loading note: ${err.message}`);
-    }
+      await initDatabase();
+      const dbState = getGameStateFromDB();
 
-    this.currentNumber = 0;
-    this.highestNumber = 0;
+      this.currentNumber = dbState.currentNumber;
+      this.highestNumber = dbState.highestNumber;
+      this.lastNumberUserId = dbState.lastUserId;
+      this.lastNumberUsername = dbState.lastUsername;
+      this.lastNumberAvatarUrl = dbState.lastAvatarUrl;
+      this.lastNumberTimestamp = dbState.lastTimestamp;
+      this.liveLeaderboardMessageId = dbState.liveLeaderboardMessageId;
+      this.numberChannelId = dbState.numberChannelId || this.numberChannelId;
+      this.numberLeaderboardChannelId = dbState.leaderboardChannelId || this.numberLeaderboardChannelId;
+
+      const userStatsMap = getUserStatsMapFromDB();
+      for (const [uid, stat] of userStatsMap.entries()) {
+        this.numberLeaderboard.set(uid, {
+          userId: stat.userId,
+          username: stat.username,
+          avatarUrl: stat.avatarUrl || undefined,
+          totalNumbersCounted: stat.totalNumbersCounted,
+          highestStreakContribution: stat.highestStreakContribution,
+          failedCount: stat.failedCount,
+          lastActive: stat.lastActive,
+        });
+      }
+
+      const cooldownsMap = getCooldownsMapFromDB();
+      for (const [uid, cd] of cooldownsMap.entries()) {
+        this.cooldowns.set(uid, {
+          userId: cd.userId,
+          username: cd.username,
+          avatarUrl: cd.avatarUrl || undefined,
+          reason: cd.reason,
+          bannedAt: cd.bannedAt,
+          bannedUntil: cd.bannedUntil,
+        });
+      }
+
+      this.addLog('info', `💾 SQLite Database loaded cleanly! Current count: ${this.currentNumber} | All-Time Record: ${this.highestNumber} | Users in DB: ${this.numberLeaderboard.size}`);
+    } catch (err: any) {
+      this.addLog('warn', `SQLite initialization note: ${err.message}`);
+    }
+  }
+
+  public setCount(newNumber: number, setByUsername: string = 'Admin'): { success: boolean; message: string; embedData: any } {
+    const prevNumber = this.currentNumber;
+    this.currentNumber = newNumber;
     this.lastNumberUserId = null;
     this.lastNumberUsername = null;
     this.lastNumberAvatarUrl = null;
-    this.lastNumberTimestamp = null;
-    this.numberLeaderboard = new Map();
-    this.threads = new Map();
-    this.cooldowns = new Map();
+    this.lastNumberTimestamp = Date.now();
 
-    this.addLog('info', `Engine initialized cleanly. Live Num: #${this.numberChannelId}`);
+    if (this.currentNumber > this.highestNumber) {
+      this.highestNumber = this.currentNumber;
+    }
+
+    this.saveStateToDisk();
+    this.triggerLiveLeaderboardUpdate();
+
+    this.addLog('command', `Counting sequence manually set from ${prevNumber} to ${newNumber} by ${setByUsername}`);
+
+    const embed = {
+      title: '⚙️ Counter Updated Successfully!',
+      description: `**${setByUsername}** set the current counting sequence to **\`${newNumber}\`**!\n\nAnyone can now continue the sequence by typing **\`${newNumber + 1}\`** in the channel.`,
+      color: 0x5865F2,
+      fields: [
+        { name: 'Current Counter', value: `\`${this.currentNumber}\``, inline: true },
+        { name: 'Next Required Number', value: `\`${this.currentNumber + 1}\``, inline: true },
+        { name: 'All-Time Record', value: `\`${this.highestNumber}\``, inline: true },
+      ],
+      footer: { text: `Database: SQLite persistent (database.sqlite) • Channel: #${this.numberChannelId}` },
+    };
+
+    return {
+      success: true,
+      message: `Count updated to ${newNumber}. Next number is ${newNumber + 1}.`,
+      embedData: embed,
+    };
   }
 
   public resetAllData() {
@@ -1391,6 +1456,11 @@ export class ECounterEngine {
                 .setName('rules')
                 .setDescription('View rules for E-counting, Number-counting, and Minigames')
                 .toJSON(),
+              new SlashCommandBuilder()
+                .setName('setcount')
+                .setDescription('Set the current counting sequence number (e.g. 1500 if bot went down)')
+                .addIntegerOption(opt => opt.setName('number').setDescription('The number reached by the community').setRequired(true))
+                .toJSON(),
             ];
 
             await rest.put(Routes.applicationCommands(botId), { body: commands });
@@ -1406,6 +1476,27 @@ export class ECounterEngine {
 
       this.client.on('messageCreate', async (msg: Message) => {
         if (msg.author.bot) return;
+
+        const trimmed = msg.content.trim();
+        
+        // Handle !setcount text command (e.g. !setcount 1500)
+        if (trimmed.startsWith('!setcount')) {
+          const parts = trimmed.split(/\s+/);
+          const targetNum = parseInt(parts[1], 10);
+          if (isNaN(targetNum) || targetNum < 0) {
+            await msg.reply('⚠️ Please specify a valid non-negative number. Example: `!setcount 1500`');
+            return;
+          }
+          const res = this.setCount(targetNum, msg.author.username);
+          const embed = new EmbedBuilder()
+            .setTitle(res.embedData.title)
+            .setDescription(res.embedData.description)
+            .setColor(res.embedData.color);
+          if (res.embedData.fields) embed.addFields(res.embedData.fields);
+          if (res.embedData.footer) embed.setFooter({ text: res.embedData.footer.text });
+          await msg.reply({ embeds: [embed] });
+          return;
+        }
 
         // Process if in E channel or Number channel
         if (msg.channelId === this.eChannelId || msg.channelId === this.numberChannelId) {
@@ -1443,7 +1534,21 @@ export class ECounterEngine {
       this.client.on('interactionCreate', async (interaction: Interaction) => {
         try {
           if (interaction.isChatInputCommand()) {
-            if (interaction.commandName === 'leaderboard') {
+            if (interaction.commandName === 'setcount') {
+              const targetNum = interaction.options.getInteger('number', true);
+              if (targetNum < 0) {
+                await interaction.reply({ content: '⚠️ Please specify a non-negative number.', ephemeral: true });
+                return;
+              }
+              const res = this.setCount(targetNum, interaction.user.username);
+              const embed = new EmbedBuilder()
+                .setTitle(res.embedData.title)
+                .setDescription(res.embedData.description)
+                .setColor(res.embedData.color);
+              if (res.embedData.fields) embed.addFields(res.embedData.fields);
+              if (res.embedData.footer) embed.setFooter({ text: res.embedData.footer.text });
+              await interaction.reply({ embeds: [embed] });
+            } else if (interaction.commandName === 'leaderboard') {
               const embedData = this.getLeaderboardEmbed(20);
               const embed = new EmbedBuilder().setTitle(embedData.title).setDescription(embedData.description).setColor(embedData.color);
               if (embedData.fields) embed.addFields(embedData.fields);
